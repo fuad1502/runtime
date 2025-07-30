@@ -65,10 +65,14 @@ bool emitInsIsLoadOrStore(instruction ins);
 // RVC emitters
 bool tryEmitCompressedIns_R_R_R(
     instruction ins, emitAttr attr, regNumber rd, regNumber rs1, regNumber rs2, insOpts opt);
+bool tryEmitCompressedIns_R_R_I(
+    instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, ssize_t imm, insOpts opt);
 
 // RVC helpers
 instruction tryGetCompressedIns_R_R_R(
     instruction ins, emitAttr attr, regNumber rd, regNumber rs1, regNumber rs2, insOpts opt);
+instruction tryGetCompressedIns_R_R_I(
+    instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, ssize_t imm, insOpts opt);
 unsigned    tryGetRvcRegisterNumber(regNumber reg);
 instruction getCompressedArithmeticIns(instruction ins);
 regNumber   getRegNumberFromRvcReg(unsigned rvcReg);
@@ -113,6 +117,8 @@ static code_t insEncodeJTypeInstr(unsigned opcode, unsigned rd, unsigned imm21);
 
 static code_t insEncodeCRTypeInstr(instruction ins, unsigned rdRs1, unsigned rs2);
 static code_t insEncodeCATypeInstr(instruction ins, unsigned rdRs1Rvc, unsigned rs2Rvc);
+static code_t insEncodeCITypeInstr(instruction ins, unsigned rd, ssize_t imm);
+static code_t insEncodeCSSTypeInstr(instruction ins, unsigned rs2, ssize_t imm);
 
 #ifdef DEBUG
 static void emitOutput_RTypeInstr_SanityCheck(instruction ins, regNumber rd, regNumber rs1, regNumber rs2);
@@ -169,7 +175,7 @@ enum class MajorOpcode
     /* inst[1:0] */
     /*        00 */ Addi4Spn, Fld,   Lw,   Ld,          Reserved2,   Fsd,   Sw,   Sd,
     /*        01 */ Addi,     Addiw, Li,   LuiAddi16Sp, MiscAlu,     J,     Beqz, Bnez,
-    /*        10 */ Slli,     FldSp, LwSp, Ldsp,        JrJalrMvAdd, FsdSp, SwSp, SdSp,
+    /*        10 */ Slli,     FldSp, LwSp, LdSp,        JrJalrMvAdd, FsdSp, SwSp, SdSp,
     // clang-format on
 };
 
