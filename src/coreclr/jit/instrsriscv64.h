@@ -317,6 +317,12 @@ INST(c_xor,         "c.xor",         0,   0x00008c21)
 INST(c_sub,         "c.sub",         0,   0x00008c01)
 INST(c_addw,        "c.addw",        0,   0x00009c21)
 INST(c_subw,        "c.subw",        0,   0x00009c01)
+INST(c_lwsp,        "c.lwsp",        0,   0x00004002)
+INST(c_ldsp,        "c.ldsp",        0,   0x00006002)
+INST(c_fldsp,       "c.fldsp",       0,   0x00002002)
+INST(c_swsp,        "c.swsp",        0,   0x0000c002)
+INST(c_sdsp,        "c.sdsp",        0,   0x0000e002)
+INST(c_fsdsp,       "c.fsdsp",       0,   0x0000a002)
 
 // clang-format on
 /*****************************************************************************/

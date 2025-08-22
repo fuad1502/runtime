@@ -732,6 +732,11 @@ void emitter::emitIns_R_R(
 void emitter::emitIns_R_R_I(
     instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, ssize_t imm, insOpts opt /* = INS_OPTS_NONE */)
 {
+    if (tryEmitCompressedIns_R_R_I(ins, attr, reg1, reg2, imm, opt))
+    {
+        return;
+    }
+
     code_t     code = emitInsCode(ins);
     instrDesc* id   = emitNewInstr(attr);
 
@@ -788,6 +793,113 @@ void emitter::emitIns_R_R_I(
     id->idCodeSize(4);
 
     appendToCurIG(id);
+}
+
+bool emitter::tryEmitCompressedIns_R_R_I(
+    instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, ssize_t imm, insOpts opt)
+{
+    instruction compressedIns = tryGetCompressedIns_R_R_I(ins, attr, reg1, reg2, imm, opt);
+    if (compressedIns == INS_none)
+    {
+        return false;
+    }
+
+    code_t code;
+    switch (compressedIns)
+    {
+        case INS_c_ldsp:
+        case INS_c_lwsp:
+        case INS_c_fldsp:
+            code = insEncodeCITypeInstr(compressedIns, reg1 & 0x1f, imm);
+            break;
+        case INS_c_swsp:
+        case INS_c_sdsp:
+        case INS_c_fsdsp:
+            code = insEncodeCSSTypeInstr(compressedIns, reg1 & 0x1f, imm);
+            break;
+        default:
+            return false;
+    };
+
+    instrDesc* id = emitNewInstr(attr);
+
+    id->idIns(ins);
+    id->idReg1(reg1);
+    id->idReg2(reg2);
+    id->idAddr()->iiaSetInstrEncode(code);
+    id->idCodeSize(2);
+
+    appendToCurIG(id);
+
+    return true;
+}
+
+instruction emitter::tryGetCompressedIns_R_R_I(
+    instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, ssize_t imm, insOpts opt)
+{
+    regNumber rd, rs1, rs2;
+    switch (ins)
+    {
+        case INS_lw:
+        case INS_ld:
+        case INS_fld:
+            rd  = reg1;
+            rs1 = reg2;
+            break;
+        case INS_sw:
+        case INS_sd:
+        case INS_fsd:
+            rs1 = reg2;
+            rs2 = reg1;
+            break;
+        default:
+            return INS_none;
+    }
+
+    switch (ins)
+    {
+        case INS_lw:
+        {
+            if ((rs1 == REG_SP) && (rd != REG_R0) && ((imm & 0b11) == 0) && ((imm >> 8) == 0))
+            {
+                return INS_c_lwsp;
+            }
+            break;
+        }
+        case INS_ld:
+            if ((rs1 == REG_SP) && (rd != REG_R0) && ((imm & 0b111) == 0) && ((imm >> 9) == 0))
+            {
+                return INS_c_ldsp;
+            }
+            break;
+        case INS_fld:
+            if ((rs1 == REG_SP) && ((rd & 0x1f) != REG_R0) && ((imm & 0b111) == 0) && ((imm >> 9) == 0))
+            {
+                return INS_c_fldsp;
+            }
+            break;
+        case INS_sw:
+            if ((rs1 == REG_SP) && ((imm & 0b11) == 0) && ((imm >> 8) == 0))
+            {
+                return INS_c_swsp;
+            }
+            break;
+        case INS_sd:
+            if ((rs1 == REG_SP) && ((imm & 0b111) == 0) && ((imm >> 9) == 0))
+            {
+                return INS_c_sdsp;
+            }
+            break;
+        case INS_fsd:
+            if ((rs1 == REG_SP) && ((imm & 0b111) == 0) && ((imm >> 9) == 0))
+            {
+                return INS_c_fsdsp;
+            }
+            break;
+        default:
+            break;
+    };
+    return INS_none;
 }
 
 /*****************************************************************************
@@ -2654,6 +2766,85 @@ static inline void assertCodeLength(size_t code, uint8_t size)
     assertCodeLength(rs2Rvc, 3);
 
     return insCode | (rs2Rvc << 2) | (rdRs1Rvc << 7);
+}
+
+/*****************************************************************************
+ *
+ *  Emit a 16-bit RISCV64C CI-Type instruction
+ *
+ *  Note: Instruction types as per RISC-V Spec, Chapter "Compressed Instruction Formats"
+ *  CI Format:
+ *  15---------13--12--11----------------7-6------------------2-1-----0
+ *  |   funct3   |imm |        rd         |        imm         |  op  |
+ *  -------------------------------------------------------------------
+ */
+
+/*static*/ emitter::code_t emitter::insEncodeCITypeInstr(instruction ins, unsigned rd, ssize_t imm)
+{
+    assert((INS_c_lwsp <= ins) && (ins <= INS_c_fldsp));
+    code_t insCode = emitInsCode(ins);
+
+    assertCodeLength(insCode, 16);
+    assertCodeLength(rd, 5);
+
+    unsigned imm12 = (imm >> 5) & 0b1;
+    unsigned imm6To2;
+    switch (ins)
+    {
+        case INS_c_lwsp:
+            assertCodeLength(imm, 8);
+            imm6To2 = ((imm >> 6) & 0b11) | (((imm >> 2) & 0b111) << 2);
+            break;
+        case INS_c_ldsp:
+        case INS_c_fldsp:
+            assertCodeLength(imm, 9);
+            imm6To2 = ((imm >> 6) & 0b111) | (((imm >> 3) & 0b11) << 3);
+            break;
+        default:
+            unreached();
+    };
+    assertCodeLength(imm6To2, 5);
+
+    return insCode | (imm6To2 << 2) | (rd << 7) | (imm12 << 12);
+}
+
+/*****************************************************************************
+ *
+ *  Emit a 16-bit RISCV64C CSS-Type instruction
+ *
+ *  Note: Instruction types as per RISC-V Spec, Chapter "Compressed Instruction Formats"
+ *  CSS Format:
+ *  15---------13-12---------------------7-6------------------2-1-----0
+ *  |   funct3   |          imm           |        rs2         |  op  |
+ *  -------------------------------------------------------------------
+ */
+
+/*static*/ emitter::code_t emitter::insEncodeCSSTypeInstr(instruction ins, unsigned rs2, ssize_t imm)
+{
+    assert((INS_c_swsp <= ins) && (ins <= INS_c_fsdsp));
+    code_t insCode = emitInsCode(ins);
+
+    assertCodeLength(insCode, 16);
+    assertCodeLength(rs2, 5);
+
+    unsigned imm12To7;
+    switch (ins)
+    {
+        case INS_c_swsp:
+            assertCodeLength(imm, 8);
+            imm12To7 = ((imm >> 6) & 0b11) | (((imm >> 2) & 0b1111) << 2);
+            break;
+        case INS_c_sdsp:
+        case INS_c_fsdsp:
+            assertCodeLength(imm, 9);
+            imm12To7 = ((imm >> 6) & 0b111) | (((imm >> 3) & 0b111) << 3);
+            break;
+        default:
+            unreached();
+    };
+    assertCodeLength(imm12To7, 6);
+
+    return insCode | (rs2 << 2) | (imm12To7 << 7);
 }
 
 static constexpr unsigned kInstructionOpcodeMask = 0x7f;
@@ -4881,6 +5072,81 @@ void emitter::emitDispInsName(
             }
             return;
         }
+        case MajorOpcode::LwSp:
+        {
+            unsigned rd         = (code >> 7) & 0x1f;
+            ssize_t  offset5    = (code >> 12) & 0b1;
+            ssize_t  offset7To6 = (code >> 2) & 0b11;
+            ssize_t  offset4To2 = (code >> 4) & 0b111;
+            ssize_t  offset     = (offset4To2 << 2) | (offset5 << 5) | (offset7To6 << 6);
+            // TODO-RISCV64-RVC: Introduce a switch in jitconfigvalues.h to show c.* prefix.
+            printf("lw             %s, ", RegNames[rd]);
+            emitDispImmediate(offset, false, REG_SP);
+            printf("(%s)\n", RegNames[REG_SP]);
+            return;
+        }
+        case MajorOpcode::LdSp:
+        {
+            unsigned rd         = (code >> 7) & 0x1f;
+            ssize_t  offset5    = (code >> 12) & 0b1;
+            ssize_t  offset8To6 = (code >> 2) & 0b111;
+            ssize_t  offset4To3 = (code >> 5) & 0b11;
+            ssize_t  offset     = (offset4To3 << 3) | (offset5 << 5) | (offset8To6 << 6);
+            // TODO-RISCV64-RVC: Introduce a switch in jitconfigvalues.h to show c.* prefix.
+            printf("ld             %s, ", RegNames[rd]);
+            emitDispImmediate(offset, false, REG_SP);
+            printf("(%s)\n", RegNames[REG_SP]);
+            return;
+        }
+        case MajorOpcode::FldSp:
+        {
+            unsigned rd         = (code >> 7) & 0x1f;
+            ssize_t  offset5    = (code >> 12) & 0b1;
+            ssize_t  offset8To6 = (code >> 2) & 0b111;
+            ssize_t  offset4To3 = (code >> 5) & 0b11;
+            ssize_t  offset     = (offset4To3 << 3) | (offset5 << 5) | (offset8To6 << 6);
+            // TODO-RISCV64-RVC: Introduce a switch in jitconfigvalues.h to show c.* prefix.
+            printf("fld            %s, ", RegNames[rd]);
+            emitDispImmediate(offset, false, REG_SP);
+            printf("(%s)\n", RegNames[REG_SP]);
+            return;
+        }
+        case MajorOpcode::SwSp:
+        {
+            unsigned rs2        = (code >> 2) & 0x1f;
+            ssize_t  offset7To6 = (code >> 7) & 0b11;
+            ssize_t  offset5To2 = (code >> 9) & 0b1111;
+            ssize_t  offset     = (offset5To2 << 2) | (offset7To6 << 6);
+            // TODO-RISCV64-RVC: Introduce a switch in jitconfigvalues.h to show c.* prefix.
+            printf("sw             %s, ", RegNames[rs2]);
+            emitDispImmediate(offset, false, REG_SP);
+            printf("(%s)\n", RegNames[REG_SP]);
+            return;
+        }
+        case MajorOpcode::SdSp:
+        {
+            unsigned rs2        = (code >> 2) & 0x1f;
+            ssize_t  offset8To6 = (code >> 7) & 0b111;
+            ssize_t  offset5To3 = (code >> 10) & 0b111;
+            ssize_t  offset     = (offset5To3 << 3) | (offset8To6 << 6);
+            // TODO-RISCV64-RVC: Introduce a switch in jitconfigvalues.h to show c.* prefix.
+            printf("sd             %s, ", RegNames[rs2]);
+            emitDispImmediate(offset, false, REG_SP);
+            printf("(%s)\n", RegNames[REG_SP]);
+            return;
+        }
+        case MajorOpcode::FsdSp:
+        {
+            unsigned rs2        = (code >> 2) & 0x1f;
+            ssize_t  offset8To6 = (code >> 7) & 0b111;
+            ssize_t  offset5To3 = (code >> 10) & 0b111;
+            ssize_t  offset     = (offset5To3 << 3) | (offset8To6 << 6);
+            // TODO-RISCV64-RVC: Introduce a switch in jitconfigvalues.h to show c.* prefix.
+            printf("fsd            %s, ", RegNames[rs2]);
+            emitDispImmediate(offset, false, REG_SP);
+            printf("(%s)\n", RegNames[REG_SP]);
+            return;
+        }
         default:
             NO_WAY("illegal ins within emitDisInsName!");
     }
@@ -5634,7 +5900,7 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
     unsigned codeSize = id->idCodeSize();
     assert((codeSize >= 2) && ((codeSize % 2) == 0));
 
-    // Some instructions like jumps or loads may have not-yet-known simple auxilliary instructions (lui, addi, slli,
+    // jump instructions may have not-yet-known simple auxilliary instructions (lui, addi, slli,
     // etc) for building immediates, assume cost of one each.
     // instrDescLoadImm consists of OpImm, OpImm32, and Lui instructions.
     float immediateBuildingCost = ((codeSize / sizeof(code_t)) - 1) * PERFSCORE_LATENCY_1C;
@@ -5773,11 +6039,19 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
         case MajorOpcode::Store:
         case MajorOpcode::LoadFp:
         case MajorOpcode::StoreFp:
+        case MajorOpcode::LwSp:
+        case MajorOpcode::LdSp:
+        case MajorOpcode::FldSp:
+        case MajorOpcode::SwSp:
+        case MajorOpcode::SdSp:
+        case MajorOpcode::FsdSp:
         {
-            bool isLoad = (opcode == MajorOpcode::Load || opcode == MajorOpcode::LoadFp);
+            bool isRegularLoad = (opcode == MajorOpcode::Load || opcode == MajorOpcode::LoadFp);
+            bool isCompressedLoad =
+                (opcode == MajorOpcode::LwSp || opcode == MajorOpcode::LdSp || opcode == MajorOpcode::FldSp);
 
-            result.insLatency = isLoad ? PERFSCORE_LATENCY_2C : PERFSCORE_LATENCY_4C;
-            if (isLoad)
+            result.insLatency = isRegularLoad || isCompressedLoad ? PERFSCORE_LATENCY_2C : PERFSCORE_LATENCY_4C;
+            if (isRegularLoad)
             {
                 code_t log2Size = (emitInsCode(ins) >> 12) & 0b11;
                 if (log2Size < 2) // sub-word loads
@@ -5788,8 +6062,7 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
             if (baseReg != REG_SP || baseReg != REG_FP)
                 result.insLatency += PERFSCORE_LATENCY_1C; // assume non-stack load/stores are more likely to cache-miss
 
-            result.insThroughput += immediateBuildingCost;
-            result.insMemoryAccessKind = isLoad ? PERFSCORE_MEMORY_READ : PERFSCORE_MEMORY_WRITE;
+            result.insMemoryAccessKind = isRegularLoad ? PERFSCORE_MEMORY_READ : PERFSCORE_MEMORY_WRITE;
             break;
         }
 
